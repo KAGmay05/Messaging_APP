@@ -1,43 +1,43 @@
 import struct
 import zlib
 
-header_format = "!HHHHHH6s6s"
+header_format = "!6s6sHHHHH"
 header_size = struct.calcsize(header_format)
 
-def encode(ethertype, type, num_frag, total_frag, sender, receiver, data: bytes):
+def encode(receiver, sender, ethertype, type, num_frag, total_frag, data: bytes):
     
     length = len(data)
 
-    sender_mac = sender.encode("utf-8")[:6].ljust(6, b"\x00")
-    receiver_mac = receiver.encode("utf-8")[:6].ljust(6, b"\x00")
+    sender_mac= bytes.fromhex(sender.replace(":", ""))
+    receiver_mac = bytes.fromhex(receiver.replace(":", ""))
 
     header = struct.pack(
         header_format,
+        receiver_mac,
+        sender_mac,
         ethertype,
         type,
         num_frag,
         total_frag,
-        length,
-        sender_mac,
-        receiver_mac
+        length
     )
-    # verificar si hay para checksum
-    crc = zlib.crc32(header + data) & 0xFFFF
-    frame = header + data + struct.pack("!H", crc)
+
+    crc = zlib.crc32(header + data) & 0xFFFFFFFF
+    frame = header + data + struct.pack("!I", crc)
     return frame
   
 def decode(frame: bytes):
     header = frame[:header_size]
     info_crc = frame[header_size:]
 
-    ethertype, type, num_frag, total_frag, length, sender, receiver = struct.unpack(
+    receiver, sender, ethertype, type, num_frag, total_frag, length  = struct.unpack(
         header_format, header)
     
     # por que -2
-    info = info_crc[:-2]
-    crc = struct.unpack("!H", info_crc[-2:])
+    info = info_crc[:length]
+    crc = struct.unpack("!I", info_crc[length:length+4])[0]
 
-    new_crc = zlib.crc32(header + info) & 0xFFFF
+    new_crc = zlib.crc32(header + info) & 0xFFFFFFFF
 
     # rectificar si es un error
     if crc != new_crc:
@@ -45,12 +45,12 @@ def decode(frame: bytes):
     
     # ver si se devuelve asi o como carlos
     return{
-         ethertype,
-         type,
-         num_frag,
-         total_frag,
-         length,
-         sender.decode(errors="ignore").strip("\x00"),
-         receiver.decode(errors="ignore").strip("\x00"),
-         info
+        "sender": ":".join(f"{b:02x}" for b in sender),
+        "receiver": ":".join(f"{b:02x}" for b in receiver),
+        "ethertype": ethertype,
+        "type": type,
+        "num_frag": num_frag,
+        "total_frag": total_frag,
+        "length": length,
+        "data": info
     }
