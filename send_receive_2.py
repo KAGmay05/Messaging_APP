@@ -3,7 +3,6 @@ import frame
 import threading
 import queue
 import time
-import os
 from typing import Tuple, Dict
 
 INTERFACE = "eth0"
@@ -13,9 +12,15 @@ ETHERTYPE = 0x88B5
 send_queue = queue.Queue()
 recv_queue = queue.Queue()
 
-known_macs: Dict[str, bool] = {}
+known_macs: Dict[str, str] = {}
 
-def get_own_mac(interface: str) -> str:
+username = None
+
+stop_event = threading.Event() 
+
+def get_own_mac(interface=None):
+    if interface is None:
+        interface = INTERFACE
     path = f"/sys/class/net/{interface}/address"
     with open(path) as f:
         return f.read().strip().lower()
@@ -23,18 +28,22 @@ def get_own_mac(interface: str) -> str:
 SENDER_MAC = get_own_mac(INTERFACE)
 
 
-def raw_socket() -> socket.socket:
+def raw_socket():
     s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(ETHERTYPE))
     s.bind((INTERFACE, 0))
     return s
 
 def announce_thread():
-    while True:
-        send_queue.put((3, BROADCAST.lower(), SENDER_MAC.encode()))
+    while not stop_event.is_set():
+        if username:
+            data = f"{username}|{SENDER_MAC}".encode()
+        else:
+            data = SENDER_MAC.encode()
+        send_queue.put((3, BROADCAST.lower(), data))
         time.sleep(5)
 
 def input_thread():
-    while True:
+    while not stop_event.is_set():
         line = input("> ").strip()
         if not line:
             continue
@@ -57,7 +66,7 @@ def input_thread():
 
 def sender_thread():
     s = raw_socket()
-    while True:
+    while not stop_event.is_set():
         type, dst, info = send_queue.get()
         frame_bytes = frame.encode(dst, SENDER_MAC, ETHERTYPE, type, 1, 1, info)
         s.send(frame_bytes)
@@ -67,7 +76,7 @@ def sender_thread():
 
 def receiver_thread():
     s = raw_socket()
-    while True:
+    while not stop_event.is_set():
         raw, addr = s.recvfrom(65535)
         try:
             decoded = frame.decode(raw)
@@ -81,13 +90,27 @@ def receiver_thread():
         if receiver != SENDER_MAC.lower() and receiver != BROADCAST.lower():
             continue
         if msg_type == 1:
-            print(f"[Mensaje de {sender}]: {payload.decode(errors='ignore')}")
+            text = payload.decode(errors='ignore')
+            recv_queue.put((sender, text))   # guardamos en la cola
+            print(f"[Mensaje de {sender}]: {text}")
             print("> ", end="", flush=True)
         elif msg_type == 3:
-            peer_mac = payload.decode().lower()
-            known_macs[peer_mac] = time.time()
+            try:
+                text = payload.decode()
+                if "|" in text:
+                    peer_name, peer_mac = text.split("|", 1)
+                else:
+                    peer_name = peer_mac = text
+            except Exception:
+                peer_name = peer_mac = payload.decode()
+            known_macs[peer_mac] = peer_name
             if peer_mac != SENDER_MAC.lower():
-                send_queue.put((3, sender, SENDER_MAC.encode()))
+                 if username:
+                     data = f"{username}|{SENDER_MAC}".encode()
+                 else:
+                     data = SENDER_MAC.encode()
+                 send_queue.put((3, sender, data))
+            
 
 
 
