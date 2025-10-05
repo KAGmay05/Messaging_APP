@@ -4,6 +4,9 @@ from tkinter import scrolledtext
 import threading
 import send_receive_2 as main
 import sys
+from tkinter import filedialog
+import os
+import file_fragments as ff
 
 # ---------- Colores y estilos ----------
 BG_COLOR = "#f7f7f7"
@@ -77,6 +80,14 @@ def start_chat_window(chat_root):
     send_button = tk.Button(input_frame, text="Enviar", bg=BUTTON_BG, fg=TEXT_COLOR, font=("Helvetica", 11, "bold"), width=10)
     send_button.grid(row=0, column=1, sticky="ew")
 
+    file_path = tk.StringVar()
+
+    file_button = tk.Button(input_frame, text="Enviar Archivo", bg=BUTTON_BG, fg=TEXT_COLOR, font=("Helvetica", 11, "bold"), width=12)
+    file_button.grid(row=0, column=2, sticky="ew", padx=(5, 0))
+
+    # label = tk.Label(root, textvariable=file_path, wraplength=300)
+    # label.pack(pady=10)
+
     selected_peer_mac = [None]
 
     # ---------- Función para mostrar historial ----------
@@ -119,19 +130,55 @@ def start_chat_window(chat_root):
 
     peer_listbox.bind("<<ListboxSelect>>", on_peer_select)
 
+    # --------- Buscar archivos en la computadora ------------
+    def file_browser():
+     filepath = filedialog.askopenfilename(
+        title="Selecciona un archivo para enviar",
+        filetypes=[
+            ("Todos los archivos", "*.*"),
+            ("Imágenes", "*.png;*.jpg;*.jpeg;*.gif"),
+            ("Documentos", "*.pdf;*.docx;*.txt")
+        ]
+     )
+     if filepath:
+        file_path.set(filepath)
+        message_entry.delete(0, tk.END)
+        message_entry.insert(0, os.path.basename(filepath) + " 💾")
+        message_entry.focus()
+        print("Archivo seleccionado:", filepath)
+
+        
+    file_button.config(command=file_browser)
+
     # ---------- Enviar mensaje ----------
     def send_message(event=None):
         msg = message_entry.get().strip()
+        filepath = file_path.get()
         if not msg or not selected_peer_mac[0]:
             return
-        main.send_queue.put((1, selected_peer_mac[0], msg.encode()))
-        save_message_to_history(selected_peer_mac[0], msg, is_self=True)
+        
+        if filepath and os.path.isfile(filepath):
+            data = ff.file_to_bytes(filepath)
+            file_id = ff.id()
+            total = (len(data) + main.CHUNK_SIZE - 1) // main.CHUNK_SIZE
+
+            for i, frag in enumerate(ff.fragment_data(data, main.CHUNK_SIZE), start=1):
+                header_info = f"{os.path.basename(filepath)}".encode()
+                main.send_queue.put((2, selected_peer_mac[0], file_id, i, total, header_info + b"||" + frag))
+
+            save_message_to_history(selected_peer_mac[0], f"[💾 Archivo enviado: {os.path.basename(filepath)}]", is_self=True)
+            file_path.set("")        
+        
+        else: 
+            main.send_queue.put((1, selected_peer_mac[0], msg.encode()))
+            save_message_to_history(selected_peer_mac[0], msg, is_self=True)
+        
         display_chat_history(selected_peer_mac[0])
         message_entry.delete(0, tk.END)
 
     message_entry.bind("<Return>", send_message)
     send_button.config(command=send_message)
-
+    
     # ---------- Actualizar lista de peers ----------
     def update_peers():
         peer_listbox.delete(0, tk.END)
