@@ -7,7 +7,7 @@ import time
 import os
 from typing import Tuple, Dict
 
-INTERFACE = "enp0s3"
+INTERFACE = "eth0"
 BROADCAST = "ff:ff:ff:ff:ff:ff"
 ETHERTYPE = 0x88B5
 CHUNK_SIZE = 1400
@@ -170,6 +170,7 @@ def receiver_thread():
                 save_name = f"recv_{file_name}"
                 ff.bytes_to_file(ordered, save_name)
                 print (f"💾 Archivo recibido de {sender}: {save_name} ({len(ordered)} bytes)")    
+                recv_queue.put((2, sender, save_name, len(ordered)))
                 del reassembly_buffers[key]   
 
         elif msg_type == 3:

@@ -1,4 +1,3 @@
-
 import tkinter as tk
 from tkinter import scrolledtext
 import threading
@@ -49,14 +48,47 @@ def start_chat_window(chat_root):
     chat_root.geometry("900x500")
 
     chat_history = {}  # mac -> lista de mensajes
+    broadcast_mode = tk.BooleanVar(value=False)
+    selected_peer_mac = [None]
+    selected_index = [None]
 
     # --- Panel lateral de peers ---
     peer_frame = tk.Frame(chat_root, bg=PEER_BG, bd=2, relief=tk.RIDGE)
     peer_frame.pack(side=tk.LEFT, fill=tk.Y, padx=10, pady=10)
 
-    tk.Label(peer_frame, text="Usuarios conectados", bg=PEER_BG, fg=TEXT_COLOR, font=("Helvetica", 14, "bold")).pack(pady=5)
-    peer_listbox = tk.Listbox(peer_frame, width=25, bg=PEER_BG, fg=TEXT_COLOR, bd=0, highlightthickness=0, font=("Helvetica", 11))
-    peer_listbox.pack(fill=tk.Y, expand=True, padx=5, pady=5)
+    tk.Label(peer_frame, text="Usuarios conectados", bg=PEER_BG, fg=TEXT_COLOR,
+             font=("Helvetica", 14, "bold")).pack(pady=5)
+
+    # Lista de usuarios
+    peer_listbox = tk.Listbox(peer_frame, width=25, bg=PEER_BG, fg=TEXT_COLOR, bd=0, highlightthickness=0,
+                              font=("Helvetica", 11))
+    peer_listbox.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+    # --- Checkbox "Enviar a todos" al final ---
+    def update_peer_highlight():
+        for i in range(peer_listbox.size()):
+            if broadcast_mode.get():
+                # Broadcast activo: todos gris
+                peer_listbox.itemconfig(i, bg="#cccccc", fg="#000000")
+            else:
+                # Broadcast inactivo: todos normales
+                peer_listbox.itemconfig(i, bg=PEER_BG, fg=TEXT_COLOR)
+
+        # Sombrear solo el seleccionado si no hay broadcast
+        if not broadcast_mode.get() and selected_index[0] is not None:
+            if selected_index[0] < peer_listbox.size():
+                peer_listbox.itemconfig(selected_index[0], bg="#bbbbbb")
+
+    broadcast_checkbox = tk.Checkbutton(
+        peer_frame,
+        text="Enviar a todos",
+        bg=PEER_BG,
+        fg=TEXT_COLOR,
+        font=("Helvetica", 11, "bold"),
+        variable=broadcast_mode,
+        command=update_peer_highlight
+    )
+    broadcast_checkbox.pack(side=tk.BOTTOM, pady=(10, 5))
 
     # --- Panel de chat ---
     chat_frame = tk.Frame(chat_root, bg=CHAT_BG, bd=2, relief=tk.RIDGE)
@@ -84,11 +116,6 @@ def start_chat_window(chat_root):
 
     file_button = tk.Button(input_frame, text="Enviar Archivo", bg=BUTTON_BG, fg=TEXT_COLOR, font=("Helvetica", 11, "bold"), width=12)
     file_button.grid(row=0, column=2, sticky="ew", padx=(5, 0))
-
-    # label = tk.Label(root, textvariable=file_path, wraplength=300)
-    # label.pack(pady=10)
-
-    selected_peer_mac = [None]
 
     # ---------- Función para mostrar historial ----------
     def display_chat_history(mac):
@@ -119,35 +146,43 @@ def start_chat_window(chat_root):
     # ---------- Selección de usuario ----------
     def on_peer_select(event):
         selection = peer_listbox.curselection()
-        if selection:
-            name = peer_listbox.get(selection[0])
-            for mac, n in main.known_macs.items():
-                if n == name:
-                    selected_peer_mac[0] = mac
-                    break
-            if selected_peer_mac[0]:
-                display_chat_history(selected_peer_mac[0])
+        if not selection:
+            return
+
+        selected_index[0] = selection[0]
+        name = peer_listbox.get(selected_index[0])
+
+        # Buscar la MAC asociada al nombre
+        for mac, n in main.known_macs.items():
+            if n == name:
+                selected_peer_mac[0] = mac
+                break
+
+        # Mostrar historial
+        if selected_peer_mac[0]:
+            display_chat_history(selected_peer_mac[0])
+
+        update_peer_highlight()  # <-- repintar correctamente según broadcast o selección
 
     peer_listbox.bind("<<ListboxSelect>>", on_peer_select)
 
     # --------- Buscar archivos en la computadora ------------
     def file_browser():
-     filepath = filedialog.askopenfilename(
-        title="Selecciona un archivo para enviar",
-        filetypes=[
-            ("Todos los archivos", "*.*"),
-            ("Imágenes", "*.png;*.jpg;*.jpeg;*.gif"),
-            ("Documentos", "*.pdf;*.docx;*.txt")
-        ]
-     )
-     if filepath:
-        file_path.set(filepath)
-        message_entry.delete(0, tk.END)
-        message_entry.insert(0, os.path.basename(filepath) + " 💾")
-        message_entry.focus()
-        print("Archivo seleccionado:", filepath)
+        filepath = filedialog.askopenfilename(
+            title="Selecciona un archivo para enviar",
+            filetypes=[
+                ("Todos los archivos", "*.*"),
+                ("Imágenes", "*.png;*.jpg;*.jpeg;*.gif"),
+                ("Documentos", "*.pdf;*.docx;*.txt")
+            ]
+        )
+        if filepath:
+            file_path.set(filepath)
+            message_entry.delete(0, tk.END)
+            message_entry.insert(0, os.path.basename(filepath) + " 💾")
+            message_entry.focus()
+            print("Archivo seleccionado:", filepath)
 
-        
     file_button.config(command=file_browser)
 
     # ---------- Enviar mensaje ----------
@@ -156,7 +191,7 @@ def start_chat_window(chat_root):
         filepath = file_path.get()
         if not msg or not selected_peer_mac[0]:
             return
-        
+
         if filepath and os.path.isfile(filepath):
             data = ff.file_to_bytes(filepath)
             file_id = ff.id()
@@ -167,33 +202,50 @@ def start_chat_window(chat_root):
                 main.send_queue.put((2, selected_peer_mac[0], file_id, i, total, header_info + b"||" + frag))
 
             save_message_to_history(selected_peer_mac[0], f"[💾 Archivo enviado: {os.path.basename(filepath)}]", is_self=True)
-            file_path.set("")        
-        
-        else: 
-            main.send_queue.put((1, selected_peer_mac[0], msg.encode()))
-            save_message_to_history(selected_peer_mac[0], msg, is_self=True)
-        
-        display_chat_history(selected_peer_mac[0])
+            file_path.set("")
+        else:
+            if broadcast_mode.get():
+                for mac in main.known_macs.keys():
+                    if mac != main.SENDER_MAC.lower():
+                        main.send_queue.put((1, mac, msg.encode()))
+                        save_message_to_history(mac, msg, is_self=True)
+            else:
+                main.send_queue.put((1, selected_peer_mac[0], msg.encode()))
+                save_message_to_history(selected_peer_mac[0], msg, is_self=True)
+                display_chat_history(selected_peer_mac[0])
         message_entry.delete(0, tk.END)
 
     message_entry.bind("<Return>", send_message)
     send_button.config(command=send_message)
-    
+
     # ---------- Actualizar lista de peers ----------
     def update_peers():
         peer_listbox.delete(0, tk.END)
         for mac, name in main.known_macs.items():
             if mac != main.SENDER_MAC.lower():
                 peer_listbox.insert(tk.END, name)
+
+        update_peer_highlight()  # <-- mantener sombreado correcto
+
         chat_root.after(1000, update_peers)
 
     # ---------- Actualizar mensajes ----------
     def update_messages():
         while not main.recv_queue.empty():
-            sender_mac, payload = main.recv_queue.get()
-            save_message_to_history(sender_mac, payload, is_self=False)
-            if sender_mac == selected_peer_mac[0]:
-                display_chat_history(selected_peer_mac[0])
+            msg = main.recv_queue.get()
+            if isinstance(msg, tuple) and msg[0] == 2:
+                # Archivo recibido
+                _, sender_mac, filename, size = msg
+                save_message_to_history(sender_mac,
+                                        f"[💾 Archivo recibido: {filename} ({size} bytes)]",
+                                        is_self=False)
+                if sender_mac == selected_peer_mac[0]:
+                    display_chat_history(selected_peer_mac[0])
+            else:
+                sender_mac, payload = msg
+                save_message_to_history(sender_mac, payload, is_self=False)
+                if sender_mac == selected_peer_mac[0]:
+                    display_chat_history(selected_peer_mac[0])
         chat_root.after(500, update_messages)
 
     # ---------- Iniciar hilos ----------
@@ -216,13 +268,64 @@ def accept_username():
     name = username_entry.get().strip()
     if not name:
         return
+
     main.username = name
     login_root.withdraw()
-    chat_root = tk.Toplevel(login_root)
-    start_chat_window(chat_root)
+
+    select_root = tk.Toplevel(login_root)
+    select_root.title("Seleccionar red")
+    select_root.configure(bg=BG_COLOR)
+    select_root.geometry("400x300")
+    select_root.resizable(False, False)
+
+    tk.Label(select_root, text="Elija la red a conectarse:",
+             font=("Helvetica", 16, "bold"), bg=BG_COLOR, fg=TEXT_COLOR).pack(pady=20)
+
+    def set_interface(interface_name):
+        main.INTERFACE = interface_name
+        print(f"[INFO] Interfaz seleccionada: {main.INTERFACE}")
+        select_root.destroy()
+        chat_root = tk.Toplevel(login_root)
+        start_chat_window(chat_root)
+
+    tk.Button(select_root, text="WiFi", font=FONT_MAIN, bg=BUTTON_BG,
+              fg=TEXT_COLOR, width=20, command=lambda: set_interface("wlo1")).pack(pady=10)
+    tk.Button(select_root, text="Macvlan", font=FONT_MAIN, bg=BUTTON_BG,
+              fg=TEXT_COLOR, width=20, command=lambda: set_interface("eth0")).pack(pady=10)
+    tk.Button(select_root, text="VM", font=FONT_MAIN, bg=BUTTON_BG,
+              fg=TEXT_COLOR, width=20, command=lambda: set_interface("enp0s3")).pack(pady=10)
+
+    def custom_interface():
+        custom_root = tk.Toplevel(select_root)
+        custom_root.title("Otra interfaz")
+        custom_root.configure(bg=BG_COLOR)
+        custom_root.geometry("350x180")
+        custom_root.resizable(False, False)
+
+        tk.Label(custom_root, text="Escriba el nombre de la interfaz:",
+                 font=FONT_MAIN, bg=BG_COLOR, fg=TEXT_COLOR).pack(pady=10)
+        entry_iface = tk.Entry(custom_root, font=FONT_MAIN, bg=ENTRY_BG, fg=TEXT_COLOR)
+        entry_iface.pack(pady=5, ipadx=5, ipady=5)
+
+        def confirm_custom():
+            iface = entry_iface.get().strip()
+            if iface:
+                main.INTERFACE = iface
+                print(f"[INFO] Interfaz personalizada: {main.INTERFACE}")
+                custom_root.destroy()
+                select_root.destroy()
+                chat_root = tk.Toplevel(login_root)
+                start_chat_window(chat_root)
+
+        tk.Button(custom_root, text="Aceptar", bg=BUTTON_BG, fg=TEXT_COLOR,
+                  font=("Helvetica", 11, "bold"), command=confirm_custom).pack(pady=10)
+
+    tk.Button(select_root, text="Otro...", font=FONT_MAIN, bg=BUTTON_BG,
+              fg=TEXT_COLOR, width=20, command=custom_interface).pack(pady=10)
 
 tk.Button(login_root, text="Aceptar", font=("Helvetica", 12, "bold"), bg=BUTTON_BG, fg=TEXT_COLOR,
           bd=0, relief=tk.RAISED, command=accept_username).pack(pady=10)
 username_entry.bind("<Return>", lambda e: accept_username())
 
 login_root.mainloop()
+
