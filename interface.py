@@ -196,12 +196,30 @@ def start_chat_window(chat_root):
             data = ff.file_to_bytes(filepath)
             file_id = ff.id()
             total = (len(data) + main.CHUNK_SIZE - 1) // main.CHUNK_SIZE
+            filename = os.path.basename(filepath)
 
-            for i, frag in enumerate(ff.fragment_data(data, main.CHUNK_SIZE), start=1):
-                header_info = f"{os.path.basename(filepath)}".encode()
-                main.send_queue.put((2, selected_peer_mac[0], file_id, i, total, header_info + b"||" + frag))
+            if broadcast_mode.get():
+                # 🔹 Enviar a todos los peers conocidos
+                for mac in main.known_macs.keys():
+                    if mac != main.SENDER_MAC.lower():
+                        for i, frag in enumerate(ff.fragment_data(data, main.CHUNK_SIZE), start=1):
+                            header_info = filename.encode()
+                            main.send_queue.put((2, mac, file_id, i, total, header_info + b"||" + frag))
+                        save_message_to_history(mac, f"[💾 Archivo enviado: {filename}]", is_self=True)
 
-            save_message_to_history(selected_peer_mac[0], f"[💾 Archivo enviado: {os.path.basename(filepath)}]", is_self=True)
+                # 🔹 Actualizar chat actual
+                if selected_peer_mac[0] in main.known_macs:
+                    display_chat_history(selected_peer_mac[0])
+
+            else:
+                # 🔹 Enviar solo al usuario seleccionado
+                for i, frag in enumerate(ff.fragment_data(data, main.CHUNK_SIZE), start=1):
+                    header_info = filename.encode()
+                    main.send_queue.put((2, selected_peer_mac[0], file_id, i, total, header_info + b"||" + frag))
+
+                save_message_to_history(selected_peer_mac[0], f"[💾 Archivo enviado: {filename}]", is_self=True)
+                display_chat_history(selected_peer_mac[0])
+
             file_path.set("")
         else:
             if broadcast_mode.get():
@@ -209,6 +227,8 @@ def start_chat_window(chat_root):
                     if mac != main.SENDER_MAC.lower():
                         main.send_queue.put((1, mac, msg.encode()))
                         save_message_to_history(mac, msg, is_self=True)
+                if selected_peer_mac[0] in main.known_macs:
+                     display_chat_history(selected_peer_mac[0])
             else:
                 main.send_queue.put((1, selected_peer_mac[0], msg.encode()))
                 save_message_to_history(selected_peer_mac[0], msg, is_self=True)
