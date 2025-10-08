@@ -4,6 +4,7 @@ import threading
 import send_receive_2 as main
 import sys
 from tkinter import filedialog
+from tkinter import messagebox
 import os
 import file_fragments as ff
 
@@ -303,7 +304,12 @@ def accept_username():
 
     def set_interface(interface_name):
         main.INTERFACE = interface_name
-        print(f"[INFO] Interfaz seleccionada: {main.INTERFACE}")
+        try:
+            main.SENDER_MAC = main.get_own_mac(main.INTERFACE)
+            print(f"[INFO] Interfaz seleccionada: {main.INTERFACE} ({main.SENDER_MAC})")
+        except FileNotFoundError:
+            messagebox.showerror("Interfaz inválida", f"No se encontró la interfaz '{main.INTERFACE}'. Elija otra.")
+            return  # no sigue si no existe
         select_root.destroy()
         chat_root = tk.Toplevel(login_root)
         start_chat_window(chat_root)

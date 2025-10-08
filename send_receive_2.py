@@ -11,7 +11,7 @@ INTERFACE = "eth0"
 BROADCAST = "ff:ff:ff:ff:ff:ff"
 ETHERTYPE = 0x88B5
 CHUNK_SIZE = 1400
-
+SENDER_MAC = None
 send_queue = queue.Queue()
 recv_queue = queue.Queue()
 reassembly_buffers: Dict[Tuple[str,int], Dict] = {}
@@ -28,7 +28,7 @@ def get_own_mac(interface=None):
     with open(path) as f:
         return f.read().strip().lower()
 
-SENDER_MAC = get_own_mac(INTERFACE)
+
 
 
 def raw_socket():
