@@ -12,11 +12,12 @@ BROADCAST = "ff:ff:ff:ff:ff:ff"
 ETHERTYPE = 0x88B5
 CHUNK_SIZE = 1400
 SENDER_MAC = None
+
 send_queue = queue.Queue()
 recv_queue = queue.Queue()
 reassembly_buffers: Dict[Tuple[str,int], Dict] = {}
 known_macs: Dict[str, str] = {}
-
+mutex = threading.Lock()
 username = None
 
 stop_event = threading.Event() 
@@ -51,7 +52,9 @@ def input_thread():
         if not line:
             continue
         if line == "peers":
-            print("🔎 Peers conocidos:", list(known_macs.keys()))
+            with mutex:
+                peers = list(known_macs.keys())
+            print("🔎 Peers conocidos:", peers)
             continue
 
         if line.startswith("/send "):  
@@ -85,7 +88,9 @@ def input_thread():
                 print("Formato inválido. Usa @<MAC> <mensaje>")
                 continue
         else:
-            for mac in list(known_macs.keys()):
+            with mutex:
+                dests = list(known_macs.keys())
+            for mac in dests:
                 send_queue.put((1, mac, line.encode()))
             continue
         send_queue.put((1, dest, msg.encode()))
@@ -157,21 +162,22 @@ def receiver_thread():
             except Exception:
                 file_name, frag = "desconocido.bin", payload
             key = (sender, decoded["ethertype"])
-            if key not in reassembly_buffers:
-                reassembly_buffers[key] = {
-                    "total" : total_frag,
-                    "parts" : {},
-                    "file_name": file_name
-                }      
+            with mutex:
+                if key not in reassembly_buffers:
+                     reassembly_buffers[key] = {
+                       "total" : total_frag,
+                       "parts" : {},
+                       "file_name": file_name
+                    }      
 
-            reassembly_buffers[key]["parts"][num_frag] = frag
-            if len(reassembly_buffers[key]["parts"]) == total_frag:
-                ordered = b"".join(reassembly_buffers[key]["parts"][i] for i in range(1, total_frag + 1))
-                save_name = f"recv_{file_name}"
-                ff.bytes_to_file(ordered, save_name)
-                print (f"💾 Archivo recibido de {sender}: {save_name} ({len(ordered)} bytes)")    
-                recv_queue.put((2, sender, save_name, len(ordered)))
-                del reassembly_buffers[key]   
+                reassembly_buffers[key]["parts"][num_frag] = frag
+                if len(reassembly_buffers[key]["parts"]) == total_frag:
+                    ordered = b"".join(reassembly_buffers[key]["parts"][i] for i in range(1, total_frag + 1))
+                    save_name = f"recv_{file_name}"
+                    ff.bytes_to_file(ordered, save_name)
+                    print (f"💾 Archivo recibido de {sender}: {save_name} ({len(ordered)} bytes)")    
+                    recv_queue.put((2, sender, save_name, len(ordered)))
+                    del reassembly_buffers[key]   
 
         elif msg_type == 3:
             try:
@@ -182,7 +188,8 @@ def receiver_thread():
                     peer_name = peer_mac = text
             except Exception:
                 peer_name = peer_mac = payload.decode()
-            known_macs[peer_mac] = peer_name
+            with mutex:
+                known_macs[peer_mac] = peer_name
             if peer_mac != SENDER_MAC.lower():
                  if username:
                      data = f"{username}|{SENDER_MAC}".encode()
