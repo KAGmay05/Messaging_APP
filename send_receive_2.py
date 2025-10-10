@@ -11,12 +11,14 @@ INTERFACE = "enp0s3"
 BROADCAST = "ff:ff:ff:ff:ff:ff"
 ETHERTYPE = 0x88B5
 CHUNK_SIZE = 1400
+WINDOW_SIZE = 10
+TIMEOUT = 2.0
 
 send_queue = queue.Queue()
 recv_queue = queue.Queue()
 reassembly_buffers: Dict[Tuple[str,int], Dict] = {}
 known_macs: Dict[str, str] = {}
-
+pending_acks = Dict[str, Dict[int, Tuple[bytes, float]]] = {}
 username = None
 
 stop_event = threading.Event() 
@@ -98,17 +100,21 @@ def sender_thread():
         msg_type = item[0]
         if msg_type == 1:
             _,dst, info = item
-            frame_bytes = frame.encode(dst, SENDER_MAC, ETHERTYPE, msg_type, 1, 1, info)
+            frame_bytes = frame.encode(dst, SENDER_MAC, ETHERTYPE, msg_type, 1, 1,0, info)
         elif msg_type ==2:
             _,dst, file_id, frag_num, total_frag, info = item
-            frame_bytes = frame.encode(dst, SENDER_MAC, ETHERTYPE, msg_type, frag_num, total_frag, info)
+            frame_bytes = frame.encode(dst, SENDER_MAC, ETHERTYPE, msg_type, frag_num, total_frag, file_id, info)
+            
+            if file_id not in pending_acks:
+                pending_acks[file_id] = {}
+            pending_acks[file_id][frag_num] = (frame_bytes, time.time())
+
+            while len(pending_acks[file_id]) >= WINDOW_SIZE:
+                time.sleep(0.05)    
         
-        # s.send(frame_bytes)
-        # if msg_type != 3:
-        #     print(f"Enviado a {dst}: {info.decode()}")
         elif msg_type == 3:  # anuncio
             _, dst, info = item
-            frame_bytes = frame.encode(dst, SENDER_MAC, ETHERTYPE, msg_type, 1, 1, info)
+            frame_bytes = frame.encode(dst, SENDER_MAC, ETHERTYPE, msg_type, 1, 1,0, info)
 
         if frame_bytes is None:
             print("⚠️ Tipo de mensaje desconocido:", item)
@@ -139,6 +145,7 @@ def receiver_thread():
         msg_type = decoded["type"]
         num_frag = decoded["num_frag"]
         total_frag = decoded["total_frag"]
+        file_id = decoded["file_id"]
         payload  = decoded["data"]
 
         if receiver != SENDER_MAC.lower() and receiver != BROADCAST.lower():
@@ -156,7 +163,7 @@ def receiver_thread():
                 file_name = header.decode(errors="ignore")
             except Exception:
                 file_name, frag = "desconocido.bin", payload
-            key = (sender, decoded["ethertype"])
+            key = (sender, file_id)
             if key not in reassembly_buffers:
                 reassembly_buffers[key] = {
                     "total" : total_frag,

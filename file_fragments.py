@@ -22,5 +22,5 @@ def fragment_data(data, chunk_size):
         yield data[i:i + chunk_size]
 
 def id():
-    return random.randrange(0,255)        
+    return random.randrange(1,255)        
                 

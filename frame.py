@@ -1,10 +1,10 @@
 import struct
 import zlib
 
-header_format = "!6s6sHHHHH"
+header_format = "!6s6sHHHHHH"
 header_size = struct.calcsize(header_format)
 
-def encode(receiver, sender, ethertype, type, num_frag, total_frag, data: bytes):
+def encode(receiver, sender, ethertype, type, num_frag, total_frag, file_id, data: bytes):
     
     length = len(data)
 
@@ -19,6 +19,7 @@ def encode(receiver, sender, ethertype, type, num_frag, total_frag, data: bytes)
         type,
         num_frag,
         total_frag,
+        file_id,
         length
     )
 
@@ -30,10 +31,9 @@ def decode(frame: bytes):
     header = frame[:header_size]
     info_crc = frame[header_size:]
 
-    receiver, sender, ethertype, type, num_frag, total_frag, length  = struct.unpack(
+    receiver, sender, ethertype, type, num_frag, total_frag, file_id, length  = struct.unpack(
         header_format, header)
     
-    # por que -2
     info = info_crc[:length]
     crc = struct.unpack("!I", info_crc[length:length+4])[0]
 
@@ -43,7 +43,6 @@ def decode(frame: bytes):
     if crc != new_crc:
         raise ValueError("Invalid CRC")
     
-    # ver si se devuelve asi o como carlos
     return{
         "sender": ":".join(f"{b:02x}" for b in sender),
         "receiver": ":".join(f"{b:02x}" for b in receiver),
@@ -51,6 +50,7 @@ def decode(frame: bytes):
         "type": type,
         "num_frag": num_frag,
         "total_frag": total_frag,
+        "file_id": file_id,
         "length": length,
         "data": info
     }
