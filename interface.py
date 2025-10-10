@@ -7,6 +7,8 @@ from tkinter import filedialog
 from tkinter import messagebox
 import os
 import file_fragments as ff
+import queue
+
 
 # ---------- Colores y estilos ----------
 BG_COLOR = "#f7f7f7"
@@ -123,26 +125,46 @@ def start_chat_window(chat_root):
         chat_text.config(state='normal')
         chat_text.delete(1.0, tk.END)
         if mac in chat_history:
-            for message in chat_history[mac]:
-                if message.startswith("Tú: "):
-                    chat_text.insert(tk.END, f"{message}\n", "self")
+            for entry in chat_history[mac]:
+                msg = entry["text"]
+                if entry["is_self"]:
+                    # Mostrar icono según estado
+                    if entry["status"] == "failed":
+                        status_icon = " ✖"
+                    elif entry["status"] == "ack":
+                        status_icon = "✔ "
+                    else:
+                        status_icon = ""
+                    chat_text.insert(tk.END, f"Tú: {msg}{status_icon}\n", "self")
+
                 else:
-                    chat_text.insert(tk.END, f"{message}\n", "peer")
+                    chat_text.insert(tk.END, f"{msg}\n", "peer")
         chat_text.tag_config("self", background=BUBBLE_SELF, lmargin1=10, lmargin2=10, rmargin=50)
         chat_text.tag_config("peer", background=BUBBLE_PEER, lmargin1=50, lmargin2=10, rmargin=10)
         chat_text.config(state='disabled')
         chat_text.see(tk.END)
 
     # ---------- Guardar mensaje ----------
-    def save_message_to_history(mac, message, is_self=True):
+    def save_message_to_history(mac, message, is_self=True, msg_id=None, status=None):
         if mac not in chat_history:
             chat_history[mac] = []
-        if is_self:
-            formatted_message = f"Tú: {message}"
-        else:
-            sender_name = main.known_macs.get(mac, mac)
-            formatted_message = f"[{sender_name}]: {message}"
-        chat_history[mac].append(formatted_message)
+        entry = {"text": message, "is_self": is_self, "status": status, "msg_id": msg_id}
+        chat_history[mac].append(entry)
+
+        if selected_peer_mac[0] == mac:
+            display_chat_history(mac)
+
+    # Callback que la capa de red llamará cuando cambie el estado de un ACK
+    def ack_update(msg_id, status):
+        # Buscar en chat_history por msg_id
+        for mac, messages in chat_history.items():
+            for entry in messages:
+                if entry["msg_id"] == msg_id:
+                    entry["status"] = status
+                    display_chat_history(mac)
+                    return
+    main.ack_update_callback = ack_update
+
 
     # ---------- Selección de usuario ----------
     def on_peer_select(event):
@@ -190,7 +212,10 @@ def start_chat_window(chat_root):
     def send_message(event=None):
         msg = message_entry.get().strip()
         filepath = file_path.get()
-        if not msg or not selected_peer_mac[0]:
+        if not msg and not filepath:
+            return
+
+        if not broadcast_mode.get() and not selected_peer_mac[0]:
             return
 
         if filepath and os.path.isfile(filepath):
@@ -226,13 +251,16 @@ def start_chat_window(chat_root):
             if broadcast_mode.get():
                 for mac in main.known_macs.keys():
                     if mac != main.SENDER_MAC.lower():
-                        main.send_queue.put((1, mac, msg.encode()))
-                        save_message_to_history(mac, msg, is_self=True)
+                        msg_id = str(ff.id())
+                        main.send_queue.put((1, mac, msg_id, msg.encode()))
+                        save_message_to_history(mac, msg, is_self=True, msg_id=msg_id)
+
                 if selected_peer_mac[0] in main.known_macs:
                      display_chat_history(selected_peer_mac[0])
             else:
-                main.send_queue.put((1, selected_peer_mac[0], msg.encode()))
-                save_message_to_history(selected_peer_mac[0], msg, is_self=True)
+                msg_id = str(ff.id())
+                main.send_queue.put((1, selected_peer_mac[0], msg_id, msg.encode()))
+                save_message_to_history(selected_peer_mac[0], msg, is_self=True, msg_id=msg_id)
                 display_chat_history(selected_peer_mac[0])
         message_entry.delete(0, tk.END)
 
@@ -249,32 +277,43 @@ def start_chat_window(chat_root):
         update_peer_highlight()  # <-- mantener sombreado correcto
 
         chat_root.after(1000, update_peers)
+    
 
     # ---------- Actualizar mensajes ----------
     def update_messages():
-        while not main.recv_queue.empty():
-            msg = main.recv_queue.get()
-            if isinstance(msg, tuple) and msg[0] == 2:
-                # Archivo recibido
-                _, sender_mac, filename, size = msg
-                save_message_to_history(sender_mac,
-                                        f"[💾 Archivo recibido: {filename} ({size} bytes)]",
-                                        is_self=False)
-                if sender_mac == selected_peer_mac[0]:
-                    display_chat_history(selected_peer_mac[0])
-            else:
-                sender_mac, payload = msg
-                save_message_to_history(sender_mac, payload, is_self=False)
-                if sender_mac == selected_peer_mac[0]:
-                    display_chat_history(selected_peer_mac[0])
-        chat_root.after(500, update_messages)
+        try:
+            while True:
+                msg = main.recv_queue.get_nowait()  # No bloquea
+                if isinstance(msg, tuple) and msg[0] == 2:
+                    # Archivo recibido
+                    _, sender_mac, filename, size = msg
+                    save_message_to_history(sender_mac,
+                                            f"[💾 Archivo recibido: {filename} ({size} bytes)]",
+                                            is_self=False)
+                    if sender_mac == selected_peer_mac[0]:
+                        display_chat_history(sender_mac)
+                else:
+                    sender_mac, payload = msg
+                    # 🔹 Mostrar quién envió el mensaje
+                    sender_name = main.known_macs.get(sender_mac, sender_mac)
+                    save_message_to_history(sender_mac, f"{sender_name}: {payload}", is_self=False)
+                    if sender_mac == selected_peer_mac[0]:
+                        display_chat_history(sender_mac)
+
+        except queue.Empty:
+            pass  # La cola está vacía, todo normal
+        except Exception as e:
+            print("Error en update_messages:", e)  # Para depuración
+        finally:
+            chat_root.after(500, update_messages)  # Llama de nuevo periódicamente
 
     # ---------- Iniciar hilos ----------
     threads = [
         threading.Thread(target=main.input_thread, daemon=True),
         threading.Thread(target=main.sender_thread, daemon=True),
         threading.Thread(target=main.announce_thread, daemon=True),
-        threading.Thread(target=main.receiver_thread, daemon=True)
+        threading.Thread(target=main.receiver_thread, daemon=True),
+         threading.Thread(target=main.ack_manager_thread, daemon=True) 
     ]
     for t in threads:
         t.start()

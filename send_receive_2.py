@@ -22,15 +22,18 @@ username = None
 
 stop_event = threading.Event() 
 
+pending_acks = {}  # msg_id -> {dst, info, retries, timestamp}
+ACK_TIMEOUT = 3.0  # segundos antes de reintentar
+MAX_RETRIES = 3
+
+ack_update_callback = None
+
 def get_own_mac(interface=None):
     if interface is None:
         interface = INTERFACE
     path = f"/sys/class/net/{interface}/address"
     with open(path) as f:
         return f.read().strip().lower()
-
-
-
 
 def raw_socket():
     s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(ETHERTYPE))
@@ -90,10 +93,13 @@ def input_thread():
         else:
             with mutex:
                 dests = list(known_macs.keys())
+            
             for mac in dests:
                 send_queue.put((1, mac, line.encode()))
             continue
-        send_queue.put((1, dest, msg.encode()))
+        msg_id = str(ff.id())  # genera un ID único para el mensaje
+        send_queue.put((1, dest, msg_id, msg.encode()))
+
       
 
 def sender_thread():
@@ -101,19 +107,33 @@ def sender_thread():
     while not stop_event.is_set():
         item = send_queue.get()
         msg_type = item[0]
-        if msg_type == 1:
-            _,dst, info = item
-            frame_bytes = frame.encode(dst, SENDER_MAC, ETHERTYPE, msg_type, 1, 1, info)
+        
+        if msg_type in (1, 5):
+            _, dst, msg_id, info = item
+            frame_bytes = frame.encode(dst, SENDER_MAC, ETHERTYPE, 1, 1, 1, str(msg_id).encode() + b"||" + info)
+            print(msg_id)
+            if msg_type == 1:  # solo agregar a pending_acks si es la primera vez
+                with mutex:
+                    pending_acks[msg_id] = {
+                        "dst": dst,
+                        "info": info,
+                        "retries": 0,
+                        "timestamp": time.time()
+                    }
+                    print(pending_acks[msg_id]["info"])
+            
+        
         elif msg_type ==2:
             _,dst, file_id, frag_num, total_frag, info = item
             frame_bytes = frame.encode(dst, SENDER_MAC, ETHERTYPE, msg_type, frag_num, total_frag, info)
         
-        # s.send(frame_bytes)
-        # if msg_type != 3:
-        #     print(f"Enviado a {dst}: {info.decode()}")
         elif msg_type == 3:  # anuncio
             _, dst, info = item
             frame_bytes = frame.encode(dst, SENDER_MAC, ETHERTYPE, msg_type, 1, 1, info)
+        elif msg_type == 4:  # ACK
+             print("llllllllllllllllllllll")
+             _, dst, info = item
+             frame_bytes = frame.encode(dst, SENDER_MAC, ETHERTYPE, msg_type, 1, 1, info)
 
         if frame_bytes is None:
             print("⚠️ Tipo de mensaje desconocido:", item)
@@ -121,7 +141,7 @@ def sender_thread():
 
         try:
             s.send(frame_bytes)
-            if msg_type != 3:  # no imprimimos los heartbeats
+            if msg_type != 3: 
                 try:
                     print(f"Enviado a {dst}: {info.decode(errors='ignore')}")
                 except Exception:
@@ -150,10 +170,22 @@ def receiver_thread():
             continue
 
         if msg_type == 1:
+            try:
+                msg_id, payload = payload.split(b"||", 1)
+                msg_id = msg_id.decode()
+            except:
+                msg_id = None
+                payload = payload
+
             text = payload.decode(errors='ignore')
-            recv_queue.put((sender, text))   # guardamos en la cola
+            recv_queue.put((sender, text))
             print(f"[Mensaje de {sender}]: {text}")
-            print("> ", end="", flush=True)
+
+            print(msg_id)
+            with mutex:
+                ack_data = msg_id.encode()
+                send_queue.put((4, sender, ack_data))
+
 
         elif msg_type == 2:
             try:
@@ -197,6 +229,48 @@ def receiver_thread():
                      data = SENDER_MAC.encode()
                  send_queue.put((3, sender, data))
             
+        elif msg_type == 4:  # ACK
+            msg_id = payload.decode(errors="ignore").strip()
+            print("🔹 Pending acks actuales:", list(pending_acks.keys()))
+            msg_id= str(msg_id)
+            with mutex:
+                if msg_id in pending_acks:
+                    print(f"✅ ACK recibido para {msg_id}")
+                    del pending_acks[msg_id]
+                    if ack_update_callback:
+                         ack_update_callback(msg_id, "ack")
+
+
+
+                
+                
+
+def ack_manager_thread():
+    while not stop_event.is_set():
+        time.sleep(1)
+        now = time.time()
+        resend_list = []
+
+        with mutex:
+            pending_keys = list(pending_acks.keys())
+            for msg_id in pending_keys:
+                info = pending_acks.get(msg_id)
+                if info is None:
+                    continue  # ya fue eliminado
+                if now - info["timestamp"] > ACK_TIMEOUT:
+                    if info["retries"] < MAX_RETRIES:
+                        print(f"⚠️ Reintentando envío de {msg_id} a {info['dst']} (intento {info['retries']+1})")
+                        info["retries"] += 1
+                        info["timestamp"] = now
+                        # ❌ Solo poner en send_queue **si todavía existe**
+                        send_queue.put((5, info["dst"], str(msg_id), info["info"]))
+                    else:
+                        print(f"❌ Fallo permanente: no se recibió ACK para {msg_id}")
+                        if ack_update_callback:  # si la GUI registró un callback
+                              ack_update_callback(msg_id, "failed")
+                        del pending_acks[msg_id]
+
+
 
 
 if __name__ == "__main__":
@@ -206,7 +280,9 @@ if __name__ == "__main__":
     t_send = threading.Thread(target=sender_thread, daemon=True)
     t_recv = threading.Thread(target=receiver_thread, daemon=True)
     t_ann = threading.Thread(target=announce_thread, daemon=True)
-    threads.extend([t_ann, t_in, t_send, t_recv ])
+    t_ack = threading.Thread(target=ack_manager_thread, daemon=True)
+    threads.extend([t_ann, t_in, t_send, t_recv, t_ack])
+
 
     # Iniciar los hilos
     for t in threads:
