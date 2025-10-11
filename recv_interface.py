@@ -7,6 +7,8 @@ from tkinter import filedialog
 from tkinter import messagebox
 import os
 import file_fragments as ff
+import queue
+
 
 # ---------- Colores y estilos ----------
 BG_COLOR = "#f7f7f7"
@@ -123,26 +125,52 @@ def start_chat_window(chat_root):
         chat_text.config(state='normal')
         chat_text.delete(1.0, tk.END)
         if mac in chat_history:
-            for message in chat_history[mac]:
-                if message.startswith("Tú: "):
-                    chat_text.insert(tk.END, f"{message}\n", "self")
+            for entry in chat_history[mac]:
+                msg = entry["text"]
+                if entry["is_self"]:
+                    # Mostrar icono según estado
+                    if entry["status"] == "failed":
+                        status_icon = " ✖"
+                    elif entry["status"] == "ack":
+                        status_icon = "✔ "
+                    else:
+                        status_icon = ""
+                    chat_text.insert(tk.END, f"Tú: {msg}{status_icon}\n", "self")
+
                 else:
-                    chat_text.insert(tk.END, f"{message}\n", "peer")
+                    chat_text.insert(tk.END, f"{msg}\n", "peer")
         chat_text.tag_config("self", background=BUBBLE_SELF, lmargin1=10, lmargin2=10, rmargin=50)
         chat_text.tag_config("peer", background=BUBBLE_PEER, lmargin1=50, lmargin2=10, rmargin=10)
         chat_text.config(state='disabled')
         chat_text.see(tk.END)
 
     # ---------- Guardar mensaje ----------
-    def save_message_to_history(mac, message, is_self=True):
+    def save_message_to_history(mac, message, is_self=True, msg_id=None, status=None):
         if mac not in chat_history:
             chat_history[mac] = []
-        if is_self:
-            formatted_message = f"Tú: {message}"
-        else:
-            sender_name = main.known_macs.get(mac, mac)
-            formatted_message = f"[{sender_name}]: {message}"
-        chat_history[mac].append(formatted_message)
+        print(f"mmmmmmmmmmmmmmmmmmmmmm{msg_id}")
+        entry = {"text": message, "is_self": is_self, "status": status, "msg_id": msg_id}
+        chat_history[mac].append(entry)
+
+        if selected_peer_mac[0] == mac:
+            display_chat_history(mac)
+
+    # Callback que la capa de red llamará cuando cambie el estado de un ACK
+    def ack_update(msg_id, status):
+        # Buscar en chat_history por msg_id
+
+        print("jjjjjjjj")
+        for mac, messages in chat_history.items():
+            print(f"vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv{messages}")
+            for entry in messages:
+                print(f"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb{entry['msg_id']}")
+                if entry["msg_id"] == msg_id :
+                    print("kkkkkkkkkkk")
+                    entry["status"] = status
+                    display_chat_history(mac)
+                    return
+    main.ack_update_callback = ack_update
+
 
     # ---------- Selección de usuario ----------
     def on_peer_select(event):
@@ -190,54 +218,100 @@ def start_chat_window(chat_root):
     def send_message(event=None):
         msg = message_entry.get().strip()
         filepath = file_path.get()
-        if not msg or not selected_peer_mac[0]:
+        if not msg and not filepath:
             return
 
+        # Validar que haya chat seleccionado si no es broadcast
+        if not broadcast_mode.get() and not selected_peer_mac[0]:
+            return
+
+        # ---------- Enviar archivo ----------
         if filepath and os.path.isfile(filepath):
             data = ff.file_to_bytes(filepath)
-            file_id = ff.id()
             total = (len(data) + main.CHUNK_SIZE - 1) // main.CHUNK_SIZE
             filename = os.path.basename(filepath)
+            fragments = list(ff.fragment_data(data, main.CHUNK_SIZE))
 
-            if broadcast_mode.get():
-                # 🔹 Enviar a todos los peers conocidos
-                for mac in main.known_macs.keys():
-                    if mac != main.SENDER_MAC.lower():
-                        for i, frag in enumerate(ff.fragment_data(data, main.CHUNK_SIZE), start=1):
+            with main.mutex:
+                if broadcast_mode.get():
+                    # Guardar mensaje y crear ventana por cada peer
+                    for mac in main.known_macs.keys():
+                        if mac == main.SENDER_MAC.lower():
+                            continue
+                        msg_id_peer = f"{filename}_{mac}"
+                        save_message_to_history(
+                            mac,
+                            f"{filename}",
+                            is_self=True,
+                            msg_id=msg_id_peer,
+                            status=None
+                        )
+                        file_id_peer = f"{ff.id()}_{mac}"
+                        main.file_windows[file_id_peer] = {}
+                        for i, frag in enumerate(fragments, start=1):
                             header_info = filename.encode()
-                            main.send_queue.put((2, mac, file_id, i, total, header_info + b"||" + frag))
-                        save_message_to_history(mac, f"[💾 Archivo enviado: {filename}]", is_self=True)
+                            main.file_windows[file_id_peer][i] = {
+                                "dst": mac,
+                                "total": total,
+                                "info": header_info + b"||" + frag,
+                                "sent": False,
+                                "retries": 0,
+                                "timestamp": 0.0
+                            }
+                        main.enqueue_window(file_id_peer)
+                else:
+                    # Unicast normal
+                    file_id = ff.id()
+                    main.file_windows[file_id] = {}
+                    save_message_to_history(
+                        selected_peer_mac[0],
+                        f"{filename} ",
+                        is_self=True,
+                        msg_id=filename,
+                        status=None
+                    )
+                    for i, frag in enumerate(fragments, start=1):
+                        header_info = filename.encode()
+                        main.file_windows[file_id][i] = {
+                            "dst": selected_peer_mac[0],
+                            "total": total,
+                            "info": header_info + b"||" + frag,
+                            "sent": False,
+                            "retries": 0,
+                            "timestamp": 0.0
+                        }
+                    main.enqueue_window(file_id)
 
-                # 🔹 Actualizar chat actual
-                if selected_peer_mac[0] in main.known_macs:
-                    display_chat_history(selected_peer_mac[0])
-
-            else:
-                # 🔹 Enviar solo al usuario seleccionado
-                for i, frag in enumerate(ff.fragment_data(data, main.CHUNK_SIZE), start=1):
-                    header_info = filename.encode()
-                    main.send_queue.put((2, selected_peer_mac[0], file_id, i, total, header_info + b"||" + frag))
-
-                save_message_to_history(selected_peer_mac[0], f"[💾 Archivo enviado: {filename}]", is_self=True)
+            # Mostrar solo en chat seleccionado si corresponde
+            if selected_peer_mac[0]:
                 display_chat_history(selected_peer_mac[0])
+            file_path.set("")  # limpiar selección de archivo
 
-            file_path.set("")
-        else:
+        # ---------- Enviar mensaje de texto ----------
+        elif msg:
             if broadcast_mode.get():
                 for mac in main.known_macs.keys():
-                    if mac != main.SENDER_MAC.lower():
-                        main.send_queue.put((1, mac, msg.encode()))
-                        save_message_to_history(mac, msg, is_self=True)
-                if selected_peer_mac[0] in main.known_macs:
-                     display_chat_history(selected_peer_mac[0])
+                    if mac == main.SENDER_MAC.lower():
+                        continue
+                    msg_id = str(ff.id())
+                    main.send_queue.put((1, mac, msg_id, msg.encode()))
+                    save_message_to_history(mac, msg, is_self=True, msg_id=msg_id)
             else:
-                main.send_queue.put((1, selected_peer_mac[0], msg.encode()))
-                save_message_to_history(selected_peer_mac[0], msg, is_self=True)
+                msg_id = str(ff.id())
+                main.send_queue.put((1, selected_peer_mac[0], msg_id, msg.encode()))
+                save_message_to_history(selected_peer_mac[0], msg, is_self=True, msg_id=msg_id)
+
+            if selected_peer_mac[0] in main.known_macs:
                 display_chat_history(selected_peer_mac[0])
+
+        # Limpiar entrada de mensaje
         message_entry.delete(0, tk.END)
 
+
+    # Bind y comando del botón
     message_entry.bind("<Return>", send_message)
     send_button.config(command=send_message)
+
 
     # ---------- Actualizar lista de peers ----------
     def update_peers():
@@ -249,32 +323,44 @@ def start_chat_window(chat_root):
         update_peer_highlight()  # <-- mantener sombreado correcto
 
         chat_root.after(1000, update_peers)
+    
 
     # ---------- Actualizar mensajes ----------
     def update_messages():
-        while not main.recv_queue.empty():
-            msg = main.recv_queue.get()
-            if isinstance(msg, tuple) and msg[0] == 2:
-                # Archivo recibido
-                _, sender_mac, filename, size = msg
-                save_message_to_history(sender_mac,
-                                        f"[💾 Archivo recibido: {filename} ({size} bytes)]",
-                                        is_self=False)
-                if sender_mac == selected_peer_mac[0]:
-                    display_chat_history(selected_peer_mac[0])
-            else:
-                sender_mac, payload = msg
-                save_message_to_history(sender_mac, payload, is_self=False)
-                if sender_mac == selected_peer_mac[0]:
-                    display_chat_history(selected_peer_mac[0])
-        chat_root.after(500, update_messages)
+        try:
+            while True:
+                msg = main.recv_queue.get_nowait()  # No bloquea
+                if isinstance(msg, tuple) and msg[0] == 2:
+                    # Archivo recibido
+                    _, sender_mac, filename, size = msg
+                    sender_mac = sender_mac.lower()
+                    sender_name = main.known_macs.get(sender_mac, sender_mac)
+                    save_message_to_history(sender_mac,
+                                            f"{sender_name}: {filename} ({size} bytes)",
+                                            is_self=False)
+                    if sender_mac == selected_peer_mac[0]:
+                        display_chat_history(sender_mac)
+                else:
+                    sender_mac, payload = msg
+                    # 🔹 Mostrar quién envió el mensaje
+                    sender_name = main.known_macs.get(sender_mac, sender_mac)
+                    save_message_to_history(sender_mac, f"{sender_name}: {payload}", is_self=False)
+                    if sender_mac == selected_peer_mac[0]:
+                        display_chat_history(sender_mac)
+
+        except queue.Empty:
+            pass  # La cola está vacía, todo normal
+        except Exception as e:
+            print("Error en update_messages:", e)  # Para depuración
+        finally:
+            chat_root.after(500, update_messages)  # Llama de nuevo periódicamente
 
     # ---------- Iniciar hilos ----------
     threads = [
-        threading.Thread(target=main.input_thread, daemon=True),
         threading.Thread(target=main.sender_thread, daemon=True),
         threading.Thread(target=main.announce_thread, daemon=True),
-        threading.Thread(target=main.receiver_thread, daemon=True)
+        threading.Thread(target=main.receiver_thread, daemon=True),
+         threading.Thread(target=main.ack_manager_thread, daemon=True) 
     ]
     for t in threads:
         t.start()

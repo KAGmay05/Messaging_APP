@@ -11,20 +11,26 @@ INTERFACE = "eth0"
 BROADCAST = "ff:ff:ff:ff:ff:ff"
 ETHERTYPE = 0x88B5
 CHUNK_SIZE = 1400
+WINDOW_SIZE = 10
 SENDER_MAC = None
 
 send_queue = queue.Queue()
 recv_queue = queue.Queue()
 reassembly_buffers: Dict[Tuple[str,int], Dict] = {}
 known_macs: Dict[str, str] = {}
-mutex = threading.Lock()
+mutex = threading.RLock()
+pending_acks_lock = threading.Lock() 
 username = None
 
 stop_event = threading.Event() 
 
 pending_acks = {}  # msg_id -> {dst, info, retries, timestamp}
+file_windows: Dict[str, Dict[int, Dict]] = {}
 ACK_TIMEOUT = 3.0  # segundos antes de reintentar
 MAX_RETRIES = 3
+
+ACK_TIMEOUT_2 = 20.0  # segundos antes de reintentar
+MAX_RETRIES_2 = 7
 
 ack_update_callback = None
 
@@ -40,6 +46,23 @@ def raw_socket():
     s.bind((INTERFACE, 0))
     return s
 
+def enqueue_window(file_id):
+    """Envía los primeros fragmentos de la ventana de un archivo"""
+    with mutex:
+        if file_id not in file_windows:
+            return
+
+        pending = file_windows[file_id]
+        # Fragmentos aún no enviados
+        window = [frag_num for frag_num in sorted(pending) if not pending[frag_num].get("sent", False)]
+        for frag_num in window[:WINDOW_SIZE]:
+            frag_info = pending[frag_num]
+            send_queue.put((2, frag_info["dst"], file_id, frag_num, frag_info["total"], frag_info["info"]))
+            frag_info["sent"] = True
+            frag_info["timestamp"] = time.time() 
+           
+
+
 def announce_thread():
     while not stop_event.is_set():
         if username:
@@ -49,56 +72,67 @@ def announce_thread():
         send_queue.put((3, BROADCAST.lower(), data))
         time.sleep(5)
 
-def input_thread():
-    while not stop_event.is_set():
-        line = input("> ").strip()
-        if not line:
-            continue
-        if line == "peers":
-            with mutex:
-                peers = list(known_macs.keys())
-            print("🔎 Peers conocidos:", peers)
-            continue
+# def input_thread():
+#     while not stop_event.is_set():
+#         line = input("> ").strip()
+#         if not line:
+#             continue
+#         if line == "peers":
+#             with mutex:
+#                 peers = list(known_macs.keys())
+#             print("🔎 Peers conocidos:", peers)
+#             continue
 
-        if line.startswith("/send "):  
-            try:
-                _, filepath, mac = line.split(maxsplit=2)
-                dest = mac[1:].lower() if mac.startswith("@") else mac.lower()
+#         if line.startswith("/send "):  
+#             try:
+#                 _, filepath, mac = line.split(maxsplit=2)
+#                 dest = mac[1:].lower() if mac.startswith("@") else mac.lower()
 
-                if not os.path.exists(filepath):
-                    print("❌ Archivo no encontrado")
-                    continue
+#                 if not os.path.exists(filepath):
+#                     print("❌ Archivo no encontrado")
+#                     continue
 
-                data = ff.file_to_bytes(filepath)
-                file_id = ff.id()
-                total = (len(data) + CHUNK_SIZE - 1) // CHUNK_SIZE
+#                 data = ff.file_to_bytes(filepath)
+#                 file_id = ff.id()
+#                 total = (len(data) + CHUNK_SIZE - 1) // CHUNK_SIZE
 
-                print(f"📤 Enviando {filepath} ({len(data)} bytes) en {total} fragmentos...")
+#                 print(f"📤 Enviando {filepath} ({len(data)} bytes) en {total} fragmentos...")
+#                 # Preparar ventana de envío
+#                 header_info = f"{os.path.basename(filepath)}".encode()
+#                 fragments = list(ff.fragment_data(data, CHUNK_SIZE))
+#                 with mutex:
+#                     file_windows[file_id] = {}
+#                     for i, frag in enumerate(fragments, start=1):
+#                         file_windows[file_id][i] = {
+#                             "dst": dest,
+#                             "total": total,
+#                             "info": header_info + b"||" + frag,
+#                             "sent": False,
+#                              "retries": 0,
+#                             "timestamp": 0.0
+#                         }
+#                 enqueue_window(file_id)  # Envía los primeros fragmentos de la ventana
 
-                for i, frag in enumerate(ff.fragment_data(data, CHUNK_SIZE), start=1):
-                    # type=2 → archivo
-                    header_info = f"{os.path.basename(filepath)}".encode()
-                    send_queue.put((2, dest, file_id, i, total, header_info + b"||" + frag))
 
-            except ValueError:
-                print("Formato: /send <archivo> @<MAC>")
-            continue
-        if line.startswith("@"):
-            try:
-                mac, msg = line.split(maxsplit=1)
-                dest = mac.lower()
-            except ValueError:
-                print("Formato inválido. Usa @<MAC> <mensaje>")
-                continue
-        else:
-            with mutex:
-                dests = list(known_macs.keys())
+#             except ValueError:
+#                 print("Formato: /send <archivo> @<MAC>")
+#             continue
+#         if line.startswith("@"):
+#             try:
+#                 mac, msg = line.split(maxsplit=1)
+#                 dest = mac.lower()
+#             except ValueError:
+#                 print("Formato inválido. Usa @<MAC> <mensaje>")
+#                 continue
+#         else:
+#             with mutex:
+#                 dests = list(known_macs.keys())
             
-            for mac in dests:
-                send_queue.put((1, mac, line.encode()))
-            continue
-        msg_id = str(ff.id())  # genera un ID único para el mensaje
-        send_queue.put((1, dest, msg_id, msg.encode()))
+#             for mac in dests:
+#                 send_queue.put((1, mac, line.encode()))
+#             continue
+#         msg_id = str(ff.id())  # genera un ID único para el mensaje
+#         send_queue.put((1, dest, msg_id, msg.encode()))
 
       
 
@@ -149,7 +183,6 @@ def sender_thread():
         except Exception as e:
             print("❌ Error al enviar:", e)
 
-
 def receiver_thread():
     s = raw_socket()
     while not stop_event.is_set():
@@ -169,7 +202,7 @@ def receiver_thread():
         if receiver != SENDER_MAC.lower() and receiver != BROADCAST.lower():
             continue
 
-        if msg_type == 1:
+        if msg_type == 1:  # Mensaje de texto
             try:
                 msg_id, payload = payload.split(b"||", 1)
                 msg_id = msg_id.decode()
@@ -181,37 +214,45 @@ def receiver_thread():
             recv_queue.put((sender, text))
             print(f"[Mensaje de {sender}]: {text}")
 
-            print(msg_id)
             with mutex:
-                ack_data = msg_id.encode()
-                send_queue.put((4, sender, ack_data))
+                if msg_id:
+                    ack_data = msg_id.encode()
+                    send_queue.put((4, sender, ack_data))
 
-
-        elif msg_type == 2:
+        elif msg_type == 2:  # Fragmento de archivo
             try:
                 header, frag = payload.split(b"||", 1)
                 file_name = header.decode(errors="ignore")
             except Exception:
                 file_name, frag = "desconocido.bin", payload
+
             key = (sender, decoded["ethertype"])
             with mutex:
                 if key not in reassembly_buffers:
-                     reassembly_buffers[key] = {
-                       "total" : total_frag,
-                       "parts" : {},
-                       "file_name": file_name
-                    }      
+                    reassembly_buffers[key] = {
+                        "total": total_frag,
+                        "parts": {},
+                        "file_name": file_name
+                    }
 
                 reassembly_buffers[key]["parts"][num_frag] = frag
+
+                # Si ya tenemos todos los fragmentos
                 if len(reassembly_buffers[key]["parts"]) == total_frag:
-                    ordered = b"".join(reassembly_buffers[key]["parts"][i] for i in range(1, total_frag + 1))
+                    ordered = b"".join(
+                        reassembly_buffers[key]["parts"][i] for i in range(1, total_frag + 1)
+                    )
                     save_name = f"recv_{file_name}"
                     ff.bytes_to_file(ordered, save_name)
-                    print (f"💾 Archivo recibido de {sender}: {save_name} ({len(ordered)} bytes)")    
+                    print(f"💾 Archivo recibido de {sender}: {save_name} ({len(ordered)} bytes)")
                     recv_queue.put((2, sender, save_name, len(ordered)))
-                    del reassembly_buffers[key]   
+                    del reassembly_buffers[key]
 
-        elif msg_type == 3:
+                # Enviar ACK del fragmento
+                ack_payload = f"{file_name}:{num_frag}".encode()
+                send_queue.put((4, sender, ack_payload))
+
+        elif msg_type == 3:  # Anuncio
             try:
                 text = payload.decode()
                 if "|" in text:
@@ -220,68 +261,113 @@ def receiver_thread():
                     peer_name = peer_mac = text
             except Exception:
                 peer_name = peer_mac = payload.decode()
+
             with mutex:
                 known_macs[peer_mac] = peer_name
+
             if peer_mac != SENDER_MAC.lower():
-                 if username:
-                     data = f"{username}|{SENDER_MAC}".encode()
-                 else:
-                     data = SENDER_MAC.encode()
-                 send_queue.put((3, sender, data))
-            
+                data = f"{username}|{SENDER_MAC}".encode() if username else SENDER_MAC.encode()
+                send_queue.put((3, sender, data))
+
         elif msg_type == 4:  # ACK
-            msg_id = payload.decode(errors="ignore").strip()
-            print("🔹 Pending acks actuales:", list(pending_acks.keys()))
-            msg_id= str(msg_id)
+            ack_data = payload.decode(errors="ignore").strip()
             with mutex:
-                if msg_id in pending_acks:
-                    print(f"✅ ACK recibido para {msg_id}")
-                    del pending_acks[msg_id]
-                    if ack_update_callback:
-                         ack_update_callback(msg_id, "ack")
+                if ":" in ack_data:  # ACK de fragmento de archivo
+                    file_name, frag_num = ack_data.split(":", 1)
+                    frag_num = int(frag_num)
+
+                    for file_id, frags in list(file_windows.items()):
+                        # buscar fragmento correspondiente
+                        frag_to_delete = None
+                        for fn, info in frags.items():
+                            header_name = info["info"].split(b'||')[0].decode()
+                            if header_name == file_name and fn == frag_num:
+                                frag_to_delete = fn
+                                break
+
+                        if frag_to_delete is not None:
+                            del frags[frag_to_delete]
+                            enqueue_window(file_id)
+
+                            # MARCAR COMPLETADO si no quedan fragmentos
+                            if len(frags) == 0:
+                                file_windows[file_id]["completed"] = True
+                                del file_windows[file_id]
+                                print(f"✅ Archivo {file_name} enviado completamente")
+                                if ack_update_callback:
+                                    ack_update_callback(file_name, "ack")
+                        break
+
+                else:  # ACK de mensaje de texto
+                    msg_id = str(ack_data)
+                    if msg_id in pending_acks:
+                        print(f"✅ ACK recibido para {msg_id}")
+                        del pending_acks[msg_id]
+                        if ack_update_callback:
+                            ack_update_callback(msg_id, "ack")
 
 
-
-                
-                
 
 def ack_manager_thread():
     while not stop_event.is_set():
         time.sleep(1)
         now = time.time()
-        resend_list = []
 
         with mutex:
-            pending_keys = list(pending_acks.keys())
-            for msg_id in pending_keys:
+            # Reintentos de mensajes de texto
+            for msg_id in list(pending_acks.keys()):
                 info = pending_acks.get(msg_id)
                 if info is None:
-                    continue  # ya fue eliminado
+                    continue
                 if now - info["timestamp"] > ACK_TIMEOUT:
                     if info["retries"] < MAX_RETRIES:
-                        print(f"⚠️ Reintentando envío de {msg_id} a {info['dst']} (intento {info['retries']+1})")
                         info["retries"] += 1
                         info["timestamp"] = now
-                        # ❌ Solo poner en send_queue **si todavía existe**
                         send_queue.put((5, info["dst"], str(msg_id), info["info"]))
+                        print(f"🔄 Reenviando mensaje {msg_id} a {info['dst']} (intento {info['retries']})")
                     else:
-                        print(f"❌ Fallo permanente: no se recibió ACK para {msg_id}")
-                        if ack_update_callback:  # si la GUI registró un callback
-                              ack_update_callback(msg_id, "failed")
+                        print(f"❌ Fallo permanente: no se recibió ACK para mensaje {msg_id}")
+                        if ack_update_callback:
+                            ack_update_callback(msg_id, "failed")
                         del pending_acks[msg_id]
 
+            # Reintentos de fragmentos de archivos
+            for file_id, frags in list(file_windows.items()):
+                if not frags or file_windows[file_id].get("completed", False):
+                    continue  # ya completado, no reenviar
 
+                for frag_num, frag_info in list(frags.items()):
+                    elapsed = now - frag_info.get("timestamp", 0)
+                    if elapsed > ACK_TIMEOUT_2:
+                        if frag_info["retries"] < MAX_RETRIES_2:
+                            frag_info["retries"] += 1
+                            frag_info["timestamp"] = now
+                            send_queue.put((
+                                2,
+                                frag_info["dst"],
+                                file_id,
+                                frag_num,
+                                frag_info["total"],
+                                frag_info["info"]
+                            ))
+                            print(f"🔄 Reenviando fragmento {frag_num} de {file_id} a {frag_info['dst']} (intento {frag_info['retries']})")
+                        else:
+                            print(f"❌ Fallo permanente: fragmento {frag_num} de {file_id} no fue ACKeado")
+                            if ack_update_callback:
+                                file_name = frag_info["info"].split(b'||')[0].decode()
+                                ack_update_callback(file_name, "failed")
+                            del frags[frag_num]
 
 
 if __name__ == "__main__":
     threads = []
 
-    t_in = threading.Thread(target=input_thread, daemon=True)
+    #t_in = threading.Thread(target=input_thread, daemon=True)
     t_send = threading.Thread(target=sender_thread, daemon=True)
     t_recv = threading.Thread(target=receiver_thread, daemon=True)
     t_ann = threading.Thread(target=announce_thread, daemon=True)
     t_ack = threading.Thread(target=ack_manager_thread, daemon=True)
-    threads.extend([t_ann, t_in, t_send, t_recv, t_ack])
+    threads.extend([t_ann,  t_send, t_recv, t_ack])
 
 
     # Iniciar los hilos
