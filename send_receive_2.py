@@ -11,14 +11,15 @@ INTERFACE = "enp0s3"
 BROADCAST = "ff:ff:ff:ff:ff:ff"
 ETHERTYPE = 0x88B5
 CHUNK_SIZE = 1400
-WINDOW_SIZE = 10
+MAX_SEQ = 7
+WINDOW_SIZE = (MAX_SEQ + 1) // 2
 TIMEOUT = 2.0
 
 send_queue = queue.Queue()
 recv_queue = queue.Queue()
 reassembly_buffers: Dict[Tuple[str,int], Dict] = {}
 known_macs: Dict[str, str] = {}
-pending_acks = Dict[str, Dict[int, Tuple[bytes, float]]] = {}
+pending_acks: Dict[str, Dict[int, Tuple[bytes, float]]] = {}
 username = None
 
 stop_event = threading.Event() 
@@ -170,6 +171,9 @@ def receiver_thread():
                     "parts" : {},
                     "file_name": file_name
                 }      
+            ack_payload = num_frag.to_bytes(1, "big")
+            ack_frame = frame.encode(sender, SENDER_MAC, ETHERTYPE, 4, num_frag, total_frag, file_id, ack_payload)
+            s.send(ack_frame)
 
             reassembly_buffers[key]["parts"][num_frag] = frag
             if len(reassembly_buffers[key]["parts"]) == total_frag:
@@ -196,7 +200,29 @@ def receiver_thread():
                      data = SENDER_MAC.encode()
                  send_queue.put((3, sender, data))
             
+        elif msg_type == 4:
+            try: 
+                ack_num = payload[0]
+                if file_id in pending_acks and ack_num in pending_acks[file_id]:
+                    del pending_acks[file_id][ack_num]
+                    print(f"✅ ACK recibido de {sender} para fragmento {ack_num} del archivo {file_id}")   
 
+            except Exception as e:
+                print("❌ Error al procesar ACK:", e)         
+def retransmission_thread():
+    s = raw_socket()
+    while not stop_event.is_set():
+        now = time.time()
+        for file_id, frags in list(pending_acks.items()):
+            for frag_num, (frame_bytes, sent_time) in list(frags.items()):
+                if now - sent_time > TIMEOUT:
+                    try:
+                        s.send(frame_bytes)
+                        pending_acks[file_id][frag_num] = (frame_bytes, now)
+                        print(f"🔄 Retransmitido fragmento {frag_num} del archivo {file_id}")
+                    except Exception as e:
+                        print("❌ Error al retransmitir:", e)
+        time.sleep(0.1)                     
 
 if __name__ == "__main__":
     threads = []
