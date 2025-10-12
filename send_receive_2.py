@@ -10,7 +10,7 @@ from typing import Tuple, Dict
 INTERFACE = "eth0"
 BROADCAST = "ff:ff:ff:ff:ff:ff"
 ETHERTYPE = 0x88B5
-CHUNK_SIZE = 1400
+CHUNK_SIZE = 1300
 WINDOW_SIZE = 30
 SENDER_MAC = None
 
@@ -29,8 +29,8 @@ file_windows: Dict[str, Dict[int, Dict]] = {}
 ACK_TIMEOUT = 3.0  # segundos antes de reintentar
 MAX_RETRIES = 3
 
-ACK_TIMEOUT_2 = 15.0  # segundos antes de reintentar
-MAX_RETRIES_2 = 10
+ACK_TIMEOUT_2 = 10.0  # segundos antes de reintentar
+MAX_RETRIES_2 = 5
 
 ack_update_callback = None
 
@@ -57,7 +57,7 @@ def enqueue_window(file_id):
         window = [frag_num for frag_num in sorted(pending) if not pending[frag_num].get("sent", False)]
         for frag_num in window[:WINDOW_SIZE]:
             frag_info = pending[frag_num]
-            send_queue.put((2, frag_info["dst"], file_id, frag_num, frag_info["total"], frag_info["info"]))
+            send_queue.put((2, frag_info["dst"], int(file_id), frag_num, frag_info["total"], frag_info["info"]))
             frag_info["sent"] = True
             frag_info["timestamp"] = time.time() 
            
@@ -71,69 +71,6 @@ def announce_thread():
             data = SENDER_MAC.encode()
         send_queue.put((3, BROADCAST.lower(), data))
         time.sleep(5)
-
-# def input_thread():
-#     while not stop_event.is_set():
-#         line = input("> ").strip()
-#         if not line:
-#             continue
-#         if line == "peers":
-#             with mutex:
-#                 peers = list(known_macs.keys())
-#             print("🔎 Peers conocidos:", peers)
-#             continue
-
-#         if line.startswith("/send "):  
-#             try:
-#                 _, filepath, mac = line.split(maxsplit=2)
-#                 dest = mac[1:].lower() if mac.startswith("@") else mac.lower()
-
-#                 if not os.path.exists(filepath):
-#                     print("❌ Archivo no encontrado")
-#                     continue
-
-#                 data = ff.file_to_bytes(filepath)
-#                 file_id = ff.id()
-#                 total = (len(data) + CHUNK_SIZE - 1) // CHUNK_SIZE
-
-#                 print(f"📤 Enviando {filepath} ({len(data)} bytes) en {total} fragmentos...")
-#                 # Preparar ventana de envío
-#                 header_info = f"{os.path.basename(filepath)}".encode()
-#                 fragments = list(ff.fragment_data(data, CHUNK_SIZE))
-#                 with mutex:
-#                     file_windows[file_id] = {}
-#                     for i, frag in enumerate(fragments, start=1):
-#                         file_windows[file_id][i] = {
-#                             "dst": dest,
-#                             "total": total,
-#                             "info": header_info + b"||" + frag,
-#                             "sent": False,
-#                              "retries": 0,
-#                             "timestamp": 0.0
-#                         }
-#                 enqueue_window(file_id)  # Envía los primeros fragmentos de la ventana
-
-
-#             except ValueError:
-#                 print("Formato: /send <archivo> @<MAC>")
-#             continue
-#         if line.startswith("@"):
-#             try:
-#                 mac, msg = line.split(maxsplit=1)
-#                 dest = mac.lower()
-#             except ValueError:
-#                 print("Formato inválido. Usa @<MAC> <mensaje>")
-#                 continue
-#         else:
-#             with mutex:
-#                 dests = list(known_macs.keys())
-            
-#             for mac in dests:
-#                 send_queue.put((1, mac, line.encode()))
-#             continue
-#         msg_id = str(ff.id())  # genera un ID único para el mensaje
-#         send_queue.put((1, dest, msg_id, msg.encode()))
-
       
 
 def sender_thread():
@@ -144,7 +81,7 @@ def sender_thread():
         
         if msg_type in (1, 5):
             _, dst, msg_id, info = item
-            frame_bytes = frame.encode(dst, SENDER_MAC, ETHERTYPE, 1, 1, 1, str(msg_id).encode() + b"||" + info)
+            frame_bytes = frame.encode(dst, SENDER_MAC, ETHERTYPE, 1, 1, 1, 0, str(msg_id).encode() + b"||" + info)
             print(msg_id)
             if msg_type == 1:  # solo agregar a pending_acks si es la primera vez
                 with mutex:
@@ -159,15 +96,15 @@ def sender_thread():
         
         elif msg_type ==2:
             _,dst, file_id, frag_num, total_frag, info = item
-            frame_bytes = frame.encode(dst, SENDER_MAC, ETHERTYPE, msg_type, frag_num, total_frag, info)
+            frame_bytes = frame.encode(dst, SENDER_MAC, ETHERTYPE, msg_type, frag_num, total_frag,file_id, info)
         
         elif msg_type == 3:  # anuncio
             _, dst, info = item
-            frame_bytes = frame.encode(dst, SENDER_MAC, ETHERTYPE, msg_type, 1, 1, info)
+            frame_bytes = frame.encode(dst, SENDER_MAC, ETHERTYPE, msg_type, 1, 1, 0,info)
         elif msg_type == 4:  # ACK
              print("llllllllllllllllllllll")
              _, dst, info = item
-             frame_bytes = frame.encode(dst, SENDER_MAC, ETHERTYPE, msg_type, 1, 1, info)
+             frame_bytes = frame.encode(dst, SENDER_MAC, ETHERTYPE, msg_type, 1, 1, 0, info)
 
         if frame_bytes is None:
             print("⚠️ Tipo de mensaje desconocido:", item)
@@ -198,6 +135,7 @@ def receiver_thread():
         num_frag = decoded["num_frag"]
         total_frag = decoded["total_frag"]
         payload  = decoded["data"]
+        file_id = decoded["file_id"]
 
         if receiver != SENDER_MAC.lower() and receiver != BROADCAST.lower():
             continue
@@ -226,7 +164,7 @@ def receiver_thread():
             except Exception:
                 file_name, frag = "desconocido.bin", payload
 
-            key = (sender, decoded["ethertype"])
+            key = (sender, file_id)
             with mutex:
                 if key not in reassembly_buffers:
                     reassembly_buffers[key] = {
@@ -275,7 +213,7 @@ def receiver_thread():
                 if ":" in ack_data:  # ACK de fragmento de archivo
                     file_name, frag_num = ack_data.split(":", 1)
                     frag_num = int(frag_num)
-
+                    print(f"✅ ACK{frag_num} recibido")
                     for file_id, frags in list(file_windows.items()):
                         # buscar fragmento correspondiente
                         frag_to_delete = None
