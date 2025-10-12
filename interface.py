@@ -146,29 +146,24 @@ def start_chat_window(chat_root):
 
     # ---------- Guardar mensaje ----------
     def save_message_to_history(mac, message, is_self=True, msg_id=None, status=None):
+        print(f"[DEBUG_SAVE] Guardando para MAC: {mac}, Archivo: {'Archivo' if msg_id and len(mac) > 12 else 'Mensaje'}")
         if mac not in chat_history:
             chat_history[mac] = []
-        print(f"mmmmmmmmmmmmmmmmmmmmmm{msg_id}")
         entry = {"text": message, "is_self": is_self, "status": status, "msg_id": msg_id}
         chat_history[mac].append(entry)
 
-        if selected_peer_mac[0] == mac:
+        if not broadcast_mode.get() and selected_peer_mac[0] == mac:
             display_chat_history(mac)
 
     # Callback que la capa de red llamará cuando cambie el estado de un ACK
     def ack_update(msg_id, status):
         # Buscar en chat_history por msg_id
-
-        print("jjjjjjjj")
         for mac, messages in chat_history.items():
-            print(f"vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv{messages}")
             for entry in messages:
-                print(f"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb{entry['msg_id']}")
                 if entry["msg_id"] == msg_id :
-                    print("kkkkkkkkkkk")
                     entry["status"] = status
                     display_chat_history(mac)
-                    return
+                
     main.ack_update_callback = ack_update
 
 
@@ -184,7 +179,7 @@ def start_chat_window(chat_root):
         # Buscar la MAC asociada al nombre
         for mac, n in main.known_macs.items():
             if n == name:
-                selected_peer_mac[0] = mac
+                selected_peer_mac[0] = mac.lower()
                 break
 
         # Mostrar historial
@@ -233,20 +228,20 @@ def start_chat_window(chat_root):
             fragments = list(ff.fragment_data(data, main.CHUNK_SIZE))
 
             with main.mutex:
+                
                 if broadcast_mode.get():
-                    # Guardar mensaje y crear ventana por cada peer
+                     # Guardar mensaje y crear ventana por cada peer
                     for mac in main.known_macs.keys():
                         if mac == main.SENDER_MAC.lower():
                             continue
-                        msg_id_peer = f"{filename}_{mac}"
+                        file_id_peer = ff.id()
                         save_message_to_history(
                             mac,
                             f"{filename}",
                             is_self=True,
-                            msg_id=msg_id_peer,
+                            msg_id=file_id_peer,
                             status=None
                         )
-                        file_id_peer = f"{ff.id()}_{mac}"
                         main.file_windows[file_id_peer] = {}
                         for i, frag in enumerate(fragments, start=1):
                             header_info = filename.encode()
@@ -267,7 +262,7 @@ def start_chat_window(chat_root):
                         selected_peer_mac[0],
                         f"{filename} ",
                         is_self=True,
-                        msg_id=filename,
+                        msg_id=file_id,
                         status=None
                     )
                     for i, frag in enumerate(fragments, start=1):
@@ -283,7 +278,7 @@ def start_chat_window(chat_root):
                     main.enqueue_window(file_id)
 
             # Mostrar solo en chat seleccionado si corresponde
-            if selected_peer_mac[0]:
+            if broadcast_mode.get() and selected_peer_mac[0]:
                 display_chat_history(selected_peer_mac[0])
             file_path.set("")  # limpiar selección de archivo
 

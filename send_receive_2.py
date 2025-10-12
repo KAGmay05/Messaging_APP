@@ -11,7 +11,7 @@ INTERFACE = "eth0"
 BROADCAST = "ff:ff:ff:ff:ff:ff"
 ETHERTYPE = 0x88B5
 CHUNK_SIZE = 1400
-WINDOW_SIZE = 10
+WINDOW_SIZE = 30
 SENDER_MAC = None
 
 send_queue = queue.Queue()
@@ -29,8 +29,8 @@ file_windows: Dict[str, Dict[int, Dict]] = {}
 ACK_TIMEOUT = 3.0  # segundos antes de reintentar
 MAX_RETRIES = 3
 
-ACK_TIMEOUT_2 = 20.0  # segundos antes de reintentar
-MAX_RETRIES_2 = 7
+ACK_TIMEOUT_2 = 15.0  # segundos antes de reintentar
+MAX_RETRIES_2 = 10
 
 ack_update_callback = None
 
@@ -283,6 +283,7 @@ def receiver_thread():
                             header_name = info["info"].split(b'||')[0].decode()
                             if header_name == file_name and fn == frag_num:
                                 frag_to_delete = fn
+                                dst_mac = info["dst"]
                                 break
 
                         if frag_to_delete is not None:
@@ -295,7 +296,7 @@ def receiver_thread():
                                 del file_windows[file_id]
                                 print(f"✅ Archivo {file_name} enviado completamente")
                                 if ack_update_callback:
-                                    ack_update_callback(file_name, "ack")
+                                    ack_update_callback(file_id, "ack")
                         break
 
                 else:  # ACK de mensaje de texto
@@ -354,8 +355,8 @@ def ack_manager_thread():
                         else:
                             print(f"❌ Fallo permanente: fragmento {frag_num} de {file_id} no fue ACKeado")
                             if ack_update_callback:
-                                file_name = frag_info["info"].split(b'||')[0].decode()
-                                ack_update_callback(file_name, "failed")
+                                
+                                ack_update_callback(file_id, "failed")
                             del frags[frag_num]
 
 
