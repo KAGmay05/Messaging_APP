@@ -5,7 +5,6 @@ import security
 header_format = "!6s6sHHHHHH"
 header_size = struct.calcsize(header_format)
 
-     
 def encode(receiver, sender, ethertype, type, num_frag, total_frag, file_id, data: bytes):
 
     sender_mac= bytes.fromhex(sender.replace(":", ""))
@@ -42,7 +41,6 @@ def decode(frame: bytes):
 
     new_crc = zlib.crc32(header + protected_data) & 0xFFFFFFFF
 
-    # rectificar si es un error
     if crc != new_crc:
         raise ValueError("Invalid CRC")
     
